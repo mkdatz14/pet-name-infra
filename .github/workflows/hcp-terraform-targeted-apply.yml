@@ -157,7 +157,7 @@ jobs:
             "https://app.terraform.io/api/v2/runs")"
 
           run_id="$(jq -er '.data.id' <<<"${run_response}")"
-          run_url="$(jq -er '.data.links["self-html"] // empty' <<<"${run_response}")"
+          run_url="$(jq -r '.data.links["self-html"] // ""' <<<"${run_response}")"
           run_status="$(jq -er '.data.attributes.status' <<<"${run_response}")"
 
           if [[ -z "${run_url}" ]]; then
