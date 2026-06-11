@@ -3,14 +3,11 @@ name: HCP Terraform Targeted Apply
 on:
   workflow_dispatch:
     inputs:
-      deployment:
-        description: Deployment number inside the current branch environment
+      deployments:
+        description: Comma-separated deployment numbers inside the current branch environment
         required: true
-        type: choice
-        options:
-          - '1'
-          - '2'
-          - '3'
+        default: '1'
+        type: string
       auto_apply:
         description: Auto-apply after a successful plan
         required: true
@@ -25,15 +22,71 @@ permissions:
   contents: read
 
 jobs:
-  targeted-run:
-    name: Queue selected HCP Terraform run
+  prepare-targets:
+    name: Prepare deployment targets
     runs-on: ubuntu-latest
+    env:
+      BRANCH_ENVIRONMENT: ${{ github.ref_name }}
+      DEPLOYMENTS_INPUT: ${{ inputs.deployments }}
+    outputs:
+      deployments_json: ${{ steps.prepare.outputs.deployments_json }}
+      deployments_display: ${{ steps.prepare.outputs.deployments_display }}
+    steps:
+      - name: Validate branch and deployments
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "${BRANCH_ENVIRONMENT}" in
+            dev|staging|prod)
+              ;;
+            *)
+              echo "This workflow only runs from the dev, staging, or prod branches. Current branch: ${BRANCH_ENVIRONMENT}" >&2
+              exit 1
+              ;;
+          esac
+
+          deployments_json="$(jq -Rn --arg raw "${DEPLOYMENTS_INPUT}" '
+            $raw
+            | split(",")
+            | map(gsub("^\\s+|\\s+$"; ""))
+            | map(select(length > 0))
+            | unique
+          ')"
+
+          deployment_count="$(jq 'length' <<<"${deployments_json}")"
+          if [[ "${deployment_count}" == "0" ]]; then
+            echo "Provide at least one deployment number, for example: 1 or 1,2,3." >&2
+            exit 1
+          fi
+
+          invalid_deployments="$(jq -r '.[] | select(test("^(1|2|3)$") | not)' <<<"${deployments_json}")"
+          if [[ -n "${invalid_deployments}" ]]; then
+            echo "Only deployment numbers 1, 2, and 3 are supported. Invalid values: ${invalid_deployments}" >&2
+            exit 1
+          fi
+
+          deployments_display="$(jq -r 'join(", ")' <<<"${deployments_json}")"
+
+          echo "deployments_json=${deployments_json}" >> "$GITHUB_OUTPUT"
+          echo "deployments_display=${deployments_display}" >> "$GITHUB_OUTPUT"
+          echo "Prepared deployments: ${deployments_display}"
+
+  targeted-run:
+    name: Queue HCP Terraform run for deployment ${{ matrix.deployment }}
+    needs: prepare-targets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        deployment: ${{ fromJson(needs.prepare-targets.outputs.deployments_json) }}
     env:
       HCP_TERRAFORM_ORG: ${{ vars.HCP_TERRAFORM_ORG }}
       HCP_TERRAFORM_WORKSPACE_MAP: ${{ vars.HCP_TERRAFORM_WORKSPACE_MAP }}
       TF_API_TOKEN: ${{ secrets.HCP_TERRAFORM_TEAM_TOKEN }}
       BRANCH_ENVIRONMENT: ${{ github.ref_name }}
-      TARGET_KEY: ${{ format('{0}{1}', github.ref_name, inputs.deployment) }}
+      TARGET_KEY: ${{ format('{0}{1}', github.ref_name, matrix.deployment) }}
       AUTO_APPLY: ${{ inputs.auto_apply }}
       RUN_MESSAGE_SUFFIX: ${{ inputs.message }}
     steps:
@@ -56,15 +109,6 @@ jobs:
             echo "Missing repository variable HCP_TERRAFORM_WORKSPACE_MAP." >&2
             exit 1
           fi
-
-          case "${BRANCH_ENVIRONMENT}" in
-            dev|staging|prod)
-              ;;
-            *)
-              echo "This workflow only runs from the dev, staging, or prod branches. Current branch: ${BRANCH_ENVIRONMENT}" >&2
-              exit 1
-              ;;
-          esac
 
           echo "Repository configuration is present."
 
@@ -175,6 +219,7 @@ jobs:
             echo "## HCP Terraform targeted run"
             echo
             echo "- Branch environment: ${BRANCH_ENVIRONMENT}"
+            echo "- Requested deployments: ${{ needs.prepare-targets.outputs.deployments_display }}"
             echo "- Target: ${TARGET_KEY}"
             echo "- Workspace: ${{ steps.resolve.outputs.workspace_name }}"
             echo "- Auto apply: ${AUTO_APPLY}"
