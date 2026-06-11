@@ -6,6 +6,8 @@ Basic app for deploying an example pet name resource.
 
 This repository includes a manual GitHub Actions workflow at `.github/workflows/hcp-terraform-targeted-apply.yml` that queues a run for exactly one HCP Terraform workspace. It is intended to sit alongside the existing VCS connection so you can trigger a single deployment such as `dev2` or `staging3` without applying the other workspaces in the same environment.
 
+Run this workflow from the branch that already maps to the target environment: `dev`, `staging`, or `prod`.
+
 ### Required GitHub configuration
 
 Add these repository settings before using the workflow:
@@ -33,9 +35,12 @@ Example `HCP_TERRAFORM_WORKSPACE_MAP`:
 ### How it works
 
 1. You run the workflow manually from GitHub Actions.
-2. You choose the environment, deployment number, and whether the run should auto-apply.
-3. The workflow resolves the selected key, such as `dev2`, to a single workspace name from `HCP_TERRAFORM_WORKSPACE_MAP`.
-4. It checks that the target workspace does not already have a non-final run.
-5. It queues a run through the HCP Terraform Runs API using the workspace's current VCS-backed configuration version.
+2. You choose the branch that matches the target environment, then start the workflow from that branch.
+3. You choose the deployment number and whether the run should auto-apply.
+4. The workflow derives the environment from the branch name and resolves a key such as `dev2` or `staging3` from `HCP_TERRAFORM_WORKSPACE_MAP`.
+5. It checks that the target workspace does not already have a non-final run.
+6. It queues a run through the HCP Terraform Runs API using the workspace's current VCS-backed configuration version.
+
+If you run the workflow from a branch other than `dev`, `staging`, or `prod`, it fails immediately.
 
 Because the workflow only creates a run for the selected workspace, it does not fan out to the other workspace deployments.
