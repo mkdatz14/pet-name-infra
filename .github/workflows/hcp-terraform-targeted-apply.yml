@@ -47,7 +47,7 @@ jobs:
               ;;
           esac
 
-          deployments_json="$(jq -Rn --arg raw "${DEPLOYMENTS_INPUT}" '
+          deployments_json="$(jq -cRn --arg raw "${DEPLOYMENTS_INPUT}" '
             $raw
             | split(",")
             | map(gsub("^\\s+|\\s+$"; ""))
