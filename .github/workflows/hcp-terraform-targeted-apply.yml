@@ -1,0 +1,181 @@
+name: HCP Terraform Targeted Apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      deployment:
+        description: Deployment number inside the environment
+        required: true
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+      auto_apply:
+        description: Auto-apply after a successful plan
+        required: true
+        default: true
+        type: boolean
+      message:
+        description: Optional run message suffix
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  targeted-run:
+    name: Queue selected HCP Terraform run
+    runs-on: ubuntu-latest
+    env:
+      HCP_TERRAFORM_ORG: ${{ vars.HCP_TERRAFORM_ORG }}
+      HCP_TERRAFORM_WORKSPACE_MAP: ${{ vars.HCP_TERRAFORM_WORKSPACE_MAP }}
+      TF_API_TOKEN: ${{ secrets.HCP_TERRAFORM_TEAM_TOKEN }}
+      TARGET_KEY: ${{ format('{0}{1}', inputs.environment, inputs.deployment) }}
+      AUTO_APPLY: ${{ inputs.auto_apply }}
+      RUN_MESSAGE_SUFFIX: ${{ inputs.message }}
+    steps:
+      - name: Validate repository configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TF_API_TOKEN}" ]]; then
+            echo "Missing repository secret HCP_TERRAFORM_TEAM_TOKEN." >&2
+            exit 1
+          fi
+
+          if [[ -z "${HCP_TERRAFORM_ORG}" ]]; then
+            echo "Missing repository variable HCP_TERRAFORM_ORG." >&2
+            exit 1
+          fi
+
+          if [[ -z "${HCP_TERRAFORM_WORKSPACE_MAP}" ]]; then
+            echo "Missing repository variable HCP_TERRAFORM_WORKSPACE_MAP." >&2
+            exit 1
+          fi
+
+          echo "Repository configuration is present."
+
+      - name: Resolve workspace
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          workspace_name="$(jq -er --arg key "${TARGET_KEY}" '.[$key]' <<<"${HCP_TERRAFORM_WORKSPACE_MAP}")"
+
+          echo "workspace_name=${workspace_name}" >> "$GITHUB_OUTPUT"
+          echo "Selected workspace: ${workspace_name}"
+
+      - name: Fetch workspace details
+        id: workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          workspace_response="$(curl --silent --show-error \
+            --header "Authorization: Bearer ${TF_API_TOKEN}" \
+            --header "Content-Type: application/vnd.api+json" \
+            "https://app.terraform.io/api/v2/organizations/${HCP_TERRAFORM_ORG}/workspaces/${{ steps.resolve.outputs.workspace_name }}")"
+
+          workspace_id="$(jq -er '.data.id' <<<"${workspace_response}")"
+          workspace_url="$(jq -er '.data.links["self-html"]' <<<"${workspace_response}")"
+
+          echo "workspace_id=${workspace_id}" >> "$GITHUB_OUTPUT"
+          echo "workspace_url=https://app.terraform.io${workspace_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Fail if workspace already has a live run
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          runs_response="$(curl --silent --show-error \
+            --header "Authorization: Bearer ${TF_API_TOKEN}" \
+            --header "Content-Type: application/vnd.api+json" \
+            "https://app.terraform.io/api/v2/workspaces/${{ steps.workspace.outputs.workspace_id }}/runs?filter%5Bstatus_group%5D=non_final&page%5Bsize%5D=1")"
+
+          run_count="$(jq -r '.data | length' <<<"${runs_response}")"
+          if [[ "${run_count}" != "0" ]]; then
+            current_run_id="$(jq -r '.data[0].id' <<<"${runs_response}")"
+            current_run_status="$(jq -r '.data[0].attributes.status' <<<"${runs_response}")"
+            echo "Workspace already has an active run: ${current_run_id} (${current_run_status})." >&2
+            echo "See ${{ steps.workspace.outputs.workspace_url }}/runs/${current_run_id}" >&2
+            exit 1
+          fi
+
+      - name: Queue targeted run
+        id: run
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${RUN_MESSAGE_SUFFIX}" ]]; then
+            run_message="GitHub Actions targeted deploy for ${TARGET_KEY}: ${RUN_MESSAGE_SUFFIX}"
+          else
+            run_message="GitHub Actions targeted deploy for ${TARGET_KEY}"
+          fi
+
+          payload="$(jq -n \
+            --arg workspace_id "${{ steps.workspace.outputs.workspace_id }}" \
+            --arg message "${run_message}" \
+            --argjson auto_apply "${AUTO_APPLY}" \
+            '{
+              data: {
+                type: "runs",
+                attributes: {
+                  message: $message,
+                  "auto-apply": $auto_apply
+                },
+                relationships: {
+                  workspace: {
+                    data: {
+                      type: "workspaces",
+                      id: $workspace_id
+                    }
+                  }
+                }
+              }
+            }')"
+
+          run_response="$(curl --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer ${TF_API_TOKEN}" \
+            --header "Content-Type: application/vnd.api+json" \
+            --data "${payload}" \
+            "https://app.terraform.io/api/v2/runs")"
+
+          run_id="$(jq -er '.data.id' <<<"${run_response}")"
+          run_url="$(jq -er '.data.links["self-html"] // empty' <<<"${run_response}")"
+          run_status="$(jq -er '.data.attributes.status' <<<"${run_response}")"
+
+          if [[ -z "${run_url}" ]]; then
+            run_url="/app/${HCP_TERRAFORM_ORG}/workspaces/${{ steps.resolve.outputs.workspace_name }}/runs/${run_id}"
+          fi
+
+          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          echo "run_status=${run_status}" >> "$GITHUB_OUTPUT"
+          echo "run_url=https://app.terraform.io${run_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          {
+            echo "## HCP Terraform targeted run"
+            echo
+            echo "- Target: ${TARGET_KEY}"
+            echo "- Workspace: ${{ steps.resolve.outputs.workspace_name }}"
+            echo "- Auto apply: ${AUTO_APPLY}"
+            echo "- Initial status: ${{ steps.run.outputs.run_status }}"
+            echo "- Workspace URL: ${{ steps.workspace.outputs.workspace_url }}"
+            echo "- Run URL: ${{ steps.run.outputs.run_url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
